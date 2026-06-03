@@ -1,4 +1,3 @@
 @echo off
-setlocal
-cd /d "%~dp0"
-start "" "%~dp0.venv\Scripts\pythonw.exe" "%~dp0window_app.py"
+cd /d D:\software\dsv4-local-adapter
+start "" ".venv\Scripts\pythonw.exe" "window_app.py"
