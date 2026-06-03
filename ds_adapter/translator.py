@@ -270,34 +270,28 @@ def response_input_to_chat_messages(
     instructions: str | None = None,
     tool_name_map: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
-    messages: list[dict[str, Any]] = []
-    pending_tool_calls: list[dict[str, Any]] = []
     tool_name_map = tool_name_map or {}
-    if instructions:
-        messages.append({"role": "system", "content": instructions})
 
     if input_value is None:
+        messages: list[dict[str, Any]] = []
+        if instructions:
+            messages.append({"role": "system", "content": instructions})
         return messages
 
     normalized_items: list[Any]
     if isinstance(input_value, str):
         normalized_items = [{"role": "user", "content": input_value}]
     elif isinstance(input_value, list):
-        normalized_items = input_value
+        normalized_items = list(input_value)
     else:
         normalized_items = [{"role": "user", "content": render_tool_output(input_value)}]
 
-    def flush_pending_tool_calls() -> None:
-        if not pending_tool_calls:
-            return
-        messages.append(
-            {
-                "role": "assistant",
-                "content": "",
-                "tool_calls": deepcopy(pending_tool_calls),
-            }
-        )
-        pending_tool_calls.clear()
+    responded_call_ids: set[str] = set()
+    for item in normalized_items:
+        if isinstance(item, dict) and item.get("type") in {"function_call_output", "custom_tool_call_output"}:
+            call_id = str(item.get("call_id") or "")
+            if call_id:
+                responded_call_ids.add(call_id)
 
     def build_tool_call(item: dict[str, Any]) -> dict[str, Any]:
         original_name = str(item.get("name", "tool"))
@@ -315,6 +309,21 @@ def response_input_to_chat_messages(
                 "arguments": arguments,
             },
         }
+
+    messages: list[dict[str, Any]] = []
+    pending_tool_calls: list[dict[str, Any]] = []
+
+    def flush_pending_tool_calls() -> None:
+        if not pending_tool_calls:
+            return
+        messages.append(
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": deepcopy(pending_tool_calls),
+            }
+        )
+        pending_tool_calls.clear()
 
     for item in normalized_items:
         if isinstance(item, str):
@@ -339,11 +348,15 @@ def response_input_to_chat_messages(
             continue
 
         if item_type == "function_call":
-            pending_tool_calls.append(build_tool_call(item))
+            tc = build_tool_call(item)
+            if tc["id"] in responded_call_ids:
+                pending_tool_calls.append(tc)
             continue
 
         if item_type == "custom_tool_call":
-            pending_tool_calls.append(build_tool_call(item))
+            tc = build_tool_call(item)
+            if tc["id"] in responded_call_ids:
+                pending_tool_calls.append(tc)
             continue
 
         if item_type == "reasoning":
@@ -359,15 +372,15 @@ def response_input_to_chat_messages(
             }
             if normalized_role == "tool" and item.get("tool_call_id"):
                 message["tool_call_id"] = item.get("tool_call_id")
-            messages.append(
-                message
-            )
+            messages.append(message)
             continue
 
         flush_pending_tool_calls()
         messages.append({"role": "user", "content": render_tool_output(item)})
 
-    flush_pending_tool_calls()
+    if instructions:
+        messages.insert(0, {"role": "system", "content": instructions})
+
     return messages
 
 

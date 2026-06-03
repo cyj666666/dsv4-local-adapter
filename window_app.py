@@ -19,6 +19,9 @@ import httpx
 from typing import Callable
 import uvicorn
 
+import pystray
+from PIL import Image, ImageDraw
+
 from ds_adapter.app import create_app
 from ds_adapter.config import Settings
 from ds_adapter.defaults import (
@@ -350,8 +353,8 @@ class AdapterWindow:
     def __init__(self, root: tk.Tk, instance_server: socket.socket | None = None) -> None:
         self.root = root
         self.root.title(APP_TITLE)
-        self.root.geometry("980x760")
-        self.root.minsize(900, 700)
+        self.root.geometry("860x540")
+        self.root.minsize(700, 440)
 
         self.instance_server = instance_server
         self.instance_listener_thread: threading.Thread | None = None
@@ -378,7 +381,10 @@ class AdapterWindow:
 
         self._load_config()
         self._build_ui()
-        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+        self.tray_icon: pystray.Icon | None = None
+        self.tray_thread: threading.Thread | None = None
+        self._closing = False
+        self.root.protocol("WM_DELETE_WINDOW", self.hide_to_tray)
         self._start_instance_listener()
         self.root.after(200, self._flush_logs)
         self.root.after(500, self._poll_process)
@@ -391,24 +397,24 @@ class AdapterWindow:
         style = ttk.Style(self.root)
         style.theme_use("clam")
         style.configure("Card.TFrame", background="#fffdf8")
-        style.configure("Accent.TButton", padding=(16, 10), font=("Microsoft YaHei UI", 10, "bold"))
-        style.configure("TButton", padding=(12, 10), font=("Microsoft YaHei UI", 10))
-        style.configure("TLabel", background="#fffdf8", foreground="#1f2937", font=("Microsoft YaHei UI", 10))
-        style.configure("Header.TLabel", background="#fffdf8", foreground="#111827", font=("Microsoft YaHei UI", 18, "bold"))
-        style.configure("Muted.TLabel", background="#fffdf8", foreground="#5b6472", font=("Microsoft YaHei UI", 10))
+        style.configure("Accent.TButton", padding=(10, 6), font=("Microsoft YaHei UI", 9, "bold"))
+        style.configure("TButton", padding=(8, 6), font=("Microsoft YaHei UI", 9))
+        style.configure("TLabel", background="#fffdf8", foreground="#1f2937", font=("Microsoft YaHei UI", 9))
+        style.configure("Header.TLabel", background="#fffdf8", foreground="#111827", font=("Microsoft YaHei UI", 14, "bold"))
+        style.configure("Muted.TLabel", background="#fffdf8", foreground="#5b6472", font=("Microsoft YaHei UI", 9))
 
-        outer = ttk.Frame(self.root, style="Card.TFrame", padding=18)
-        outer.pack(fill="both", expand=True, padx=18, pady=18)
+        outer = ttk.Frame(self.root, style="Card.TFrame", padding=10)
+        outer.pack(fill="both", expand=True, padx=10, pady=10)
 
-        log_card = ttk.Frame(outer, style="Card.TFrame", padding=18)
-        log_card.pack(fill="both", pady=(0, 12))
+        log_card = ttk.Frame(outer, style="Card.TFrame", padding=10)
+        log_card.pack(fill="both", pady=(0, 6))
         ttk.Label(log_card, text=TEXT["log_title"], style="Header.TLabel").pack(anchor="w")
-        ttk.Label(log_card, text=TEXT["log_sub"], style="Muted.TLabel").pack(anchor="w", pady=(4, 10))
+        ttk.Label(log_card, text=TEXT["log_sub"], style="Muted.TLabel").pack(anchor="w", pady=(2, 6))
 
         self.log_text = tk.Text(
             log_card,
             wrap="word",
-            height=13,
+            height=5,
             font=("Consolas", 10),
             bg="#17212b",
             fg="#ecf4ff",
@@ -419,8 +425,8 @@ class AdapterWindow:
         )
         self.log_text.pack(fill="both", expand=True)
 
-        form_card = ttk.Frame(outer, style="Card.TFrame", padding=18)
-        form_card.pack(fill="x", pady=(0, 12))
+        form_card = ttk.Frame(outer, style="Card.TFrame", padding=8)
+        form_card.pack(fill="x", pady=(0, 5))
         form_card.columnconfigure(0, weight=1)
         form_card.columnconfigure(1, weight=1)
 
@@ -437,52 +443,35 @@ class AdapterWindow:
         self._field(form_card, TEXT["api_key"], self.api_key_var, 1, 0, show="*")
         self._field_with_button(form_card, TEXT["test_prompt"], self.test_prompt_var, TEXT["test_upstream"], self.test_upstream, 1, 1)
 
-        path_card = ttk.Frame(outer, style="Card.TFrame", padding=18)
-        path_card.pack(fill="x", pady=(0, 12))
+        path_card = ttk.Frame(outer, style="Card.TFrame", padding=8)
+        path_card.pack(fill="x", pady=(0, 5))
         path_card.columnconfigure(1, weight=1)
 
         ttk.Label(path_card, text=TEXT["cc_import_row"]).grid(row=0, column=0, sticky="w")
         ttk.Label(path_card, text=TEXT["cc_import_sub"], style="Muted.TLabel").grid(row=0, column=1, sticky="w", padx=(12, 8))
         ttk.Button(path_card, text=TEXT["import_cc"], command=self.import_to_cc, style="Accent.TButton").grid(row=0, column=2, sticky="e")
 
-        ttk.Label(path_card, text=TEXT["cc_status"]).grid(row=1, column=0, sticky="w", pady=(12, 0))
-        ttk.Label(path_card, textvariable=self.cc_status_var, style="Muted.TLabel").grid(row=1, column=1, sticky="w", padx=(12, 8), pady=(12, 0))
-        ttk.Button(path_card, text=TEXT["refresh_cc_status"], command=self.refresh_cc_status).grid(row=1, column=2, sticky="e", pady=(12, 0))
+        ttk.Label(path_card, text=TEXT["cc_status"]).grid(row=1, column=0, sticky="w", pady=(6, 0))
+        ttk.Label(path_card, textvariable=self.cc_status_var, style="Muted.TLabel").grid(row=1, column=1, sticky="w", padx=(12, 8), pady=(6, 0))
+        ttk.Button(path_card, text=TEXT["refresh_cc_status"], command=self.refresh_cc_status).grid(row=1, column=2, sticky="e", pady=(6, 0))
 
-        ttk.Label(path_card, text=TEXT["codex_config"]).grid(row=2, column=0, sticky="w", pady=(12, 0))
-        ttk.Entry(path_card, textvariable=self.codex_config_path_var).grid(row=2, column=1, sticky="ew", padx=(12, 8), pady=(12, 0))
-        ttk.Button(path_card, text=TEXT["select"], command=self.choose_codex_config).grid(row=2, column=2, sticky="e", pady=(12, 0))
-        ttk.Button(path_card, text=TEXT["apply_codex"], command=self.apply_codex_import, style="Accent.TButton").grid(row=2, column=3, sticky="e", padx=(8, 0), pady=(12, 0))
+        ttk.Label(path_card, text=TEXT["codex_config"]).grid(row=2, column=0, sticky="w", pady=(6, 0))
+        ttk.Entry(path_card, textvariable=self.codex_config_path_var).grid(row=2, column=1, sticky="ew", padx=(12, 8), pady=(6, 0))
+        ttk.Button(path_card, text=TEXT["select"], command=self.choose_codex_config).grid(row=2, column=2, sticky="e", pady=(6, 0))
+        ttk.Button(path_card, text=TEXT["apply_codex"], command=self.apply_codex_import, style="Accent.TButton").grid(row=2, column=3, sticky="e", padx=(8, 0), pady=(6, 0))
 
-        update_card = ttk.Frame(outer, style="Card.TFrame", padding=18)
-        update_card.pack(fill="x", pady=(0, 12))
-        update_card.columnconfigure(1, weight=1)
-
-        ttk.Label(update_card, text=TEXT["update_title"]).grid(row=0, column=0, sticky="w")
-        ttk.Label(update_card, textvariable=self.version_var, style="Muted.TLabel").grid(row=0, column=1, sticky="w", padx=(12, 8))
-        ttk.Button(update_card, text=TEXT["check_update"], command=self.check_updates_manual).grid(row=0, column=2, sticky="e")
-        ttk.Button(update_card, text=TEXT["open_update_link"], command=self.open_update_link).grid(row=0, column=3, sticky="e", padx=(8, 0))
-
-        ttk.Label(update_card, textvariable=self.update_status_var, style="Muted.TLabel").grid(
-            row=1,
-            column=0,
-            columnspan=4,
-            sticky="w",
-            pady=(12, 0),
-        )
-
-        action_card = ttk.Frame(outer, style="Card.TFrame", padding=18)
-        action_card.pack(fill="x", pady=(0, 12))
+        action_card = ttk.Frame(outer, style="Card.TFrame", padding=8)
+        action_card.pack(fill="x", pady=(0, 5))
         ttk.Label(action_card, textvariable=self.status_var, style="Muted.TLabel").pack(anchor="w")
 
         row1 = ttk.Frame(action_card, style="Card.TFrame")
-        row1.pack(fill="x", pady=(12, 0))
+        row1.pack(fill="x", pady=(6, 0))
         ttk.Button(row1, text=TEXT["save"], command=self.save_config).pack(side="left")
         ttk.Button(row1, text=TEXT["start"], command=self.start_server, style="Accent.TButton").pack(side="left", padx=(10, 0))
         ttk.Button(row1, text=TEXT["stop"], command=self.stop_server).pack(side="left", padx=(10, 0))
         ttk.Button(row1, text=TEXT["open_browser"], command=self.open_browser).pack(side="left", padx=(10, 0))
 
-        ttk.Label(action_card, text=TEXT["action_hint"], style="Muted.TLabel").pack(anchor="w", pady=(12, 0))
+        ttk.Label(action_card, text=TEXT["action_hint"], style="Muted.TLabel").pack(anchor="w", pady=(6, 0))
 
         self.log(TEXT["ready"] + adapter_v1_url())
         self.root.after(300, self.refresh_cc_status)
@@ -498,7 +487,7 @@ class AdapterWindow:
         colspan: int = 1,
     ) -> None:
         frame = ttk.Frame(parent, style="Card.TFrame")
-        frame.grid(row=row, column=column, columnspan=colspan, sticky="ew", padx=(0 if column == 0 else 8), pady=8)
+        frame.grid(row=row, column=column, columnspan=colspan, sticky="ew", padx=(0 if column == 0 else 6), pady=4)
         frame.columnconfigure(0, weight=1)
         ttk.Label(frame, text=label).grid(row=0, column=0, sticky="w")
         ttk.Entry(frame, textvariable=variable, show=show or "").grid(row=1, column=0, sticky="ew", pady=(6, 0))
@@ -535,7 +524,7 @@ class AdapterWindow:
         show: str | None = None,
     ) -> None:
         frame = ttk.Frame(parent, style="Card.TFrame")
-        frame.grid(row=row, column=column, columnspan=colspan, sticky="ew", padx=(0 if column == 0 else 8), pady=8)
+        frame.grid(row=row, column=column, columnspan=colspan, sticky="ew", padx=(0 if column == 0 else 6), pady=4)
         frame.columnconfigure(0, weight=1)
         ttk.Label(frame, text=label).grid(row=0, column=0, columnspan=2, sticky="w")
         ttk.Entry(frame, textvariable=variable, show=show or "").grid(row=1, column=0, sticky="ew", pady=(6, 0))
@@ -1083,8 +1072,51 @@ class AdapterWindow:
             self.root.focus_force()
         except tk.TclError:
             pass
+        if self.tray_icon is not None:
+            self.tray_icon.stop()
+            self.tray_icon = None
+            self.tray_thread = None
 
-    def on_close(self) -> None:
+    def _create_tray_image(self) -> Image.Image:
+        size = 64
+        img = Image.new("RGB", (size, size), "#14532d")
+        draw = ImageDraw.Draw(img)
+        draw.rectangle([12, 20, 28, 44], fill="white")
+        draw.rectangle([36, 12, 52, 44], fill="white")
+        draw.rectangle([18, 36, 46, 44], fill="#14532d")
+        return img
+
+    def _start_tray(self) -> None:
+        if self.tray_icon is not None:
+            return
+        menu = pystray.Menu(
+            pystray.MenuItem("显示窗口", self._show_from_tray, default=True),
+            pystray.MenuItem("退出中转工具", self.quit_app),
+        )
+        self.tray_icon = pystray.Icon(
+            "dsv4_adapter",
+            self._create_tray_image(),
+            APP_TITLE,
+            menu,
+        )
+        self.tray_thread = threading.Thread(target=self.tray_icon.run, daemon=True)
+        self.tray_thread.start()
+
+    def hide_to_tray(self) -> None:
+        self.root.withdraw()
+        self._start_tray()
+
+    def _show_from_tray(self, _icon=None, _item=None) -> None:
+        self.root.after(0, self.bring_to_front)
+
+    def quit_app(self, _icon=None, _item=None) -> None:
+        self._closing = True
+        if self.tray_icon is not None:
+            self.tray_icon.stop()
+            self.tray_icon = None
+        self.root.after(0, self._destroy)
+
+    def _destroy(self) -> None:
         if self.server is not None and self.server_thread is not None and self.server_thread.is_alive():
             self.stop_server()
         if self.instance_server is not None:
@@ -1093,6 +1125,9 @@ class AdapterWindow:
             except OSError:
                 pass
         self.root.destroy()
+
+    def on_close(self) -> None:
+        self.quit_app()
 
 
 def acquire_single_instance_server() -> socket.socket | None:
